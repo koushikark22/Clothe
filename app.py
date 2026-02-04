@@ -38,9 +38,15 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-load_dotenv()
-API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-keys_env = os.getenv("GEMINI_API_KEYS")
+load_dotenv()  # local only; on Streamlit Cloud .env won't exist
+
+def _get_secret(name: str) -> str:
+    # Works locally via .env and on Streamlit Cloud via st.secrets
+    return os.getenv(name) or st.secrets.get(name, "")
+
+API_KEY = _get_secret("GEMINI_API_KEY") or _get_secret("GOOGLE_API_KEY")
+keys_env = _get_secret("GEMINI_API_KEYS")
+
 API_KEYS = [k.strip() for k in keys_env.split(",") if k.strip()] if keys_env else []
 if API_KEY and not API_KEYS:
     API_KEYS = [API_KEY]

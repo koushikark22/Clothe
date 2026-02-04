@@ -1,1 +1,14 @@
+
+streamlit>=1.31
+requests
 feedparser
+python-dotenv
+
+# Image + CV
+Pillow
+numpy
+opencv-python-headless
+
+# Google Gemini
+google-generativeai
+google-api-core

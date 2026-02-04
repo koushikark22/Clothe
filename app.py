@@ -65,9 +65,14 @@ CURRENT_KEY = next(KEY_CYCLE) if API_KEYS else None
 if HAS_GEMINI and CURRENT_KEY:
     genai.configure(api_key=CURRENT_KEY)
 
-# ✅ Use stable models (don’t rely on list_models on Cloud)
-TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL") or "gemini-1.5-flash"
-VISION_MODEL = os.getenv("GEMINI_VISION_MODEL") or "gemini-1.5-flash"
+# ✅ FIX: use currently supported Gemini API model IDs
+# According to Google AI for Developers docs, stable flash model code is gemini-2.5-flash. :contentReference[oaicite:1]{index=1}
+TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL") or "gemini-2.5-flash"
+VISION_MODEL = os.getenv("GEMINI_VISION_MODEL") or "gemini-2.5-flash"
+
+# Optional fallback if a model is unavailable in your region/key
+FALLBACK_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL_FALLBACK") or "gemini-2.5-flash-lite"
+FALLBACK_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL_FALLBACK") or "gemini-2.5-flash-lite"
 
 
 # -----------------------------
@@ -152,9 +157,7 @@ def _safe_json_loads(text: str) -> Optional[dict]:
         return json.loads(text)
     except Exception:
         pass
-    # strip code fences
     cleaned = re.sub(r"```(?:json)?", "", text, flags=re.IGNORECASE).strip("` \n\t")
-    # take outermost {...}
     start, end = cleaned.find("{"), cleaned.rfind("}")
     if start != -1 and end != -1 and end > start:
         try:
@@ -316,7 +319,6 @@ def sample_skin_rgb(img: Image.Image, face_box: Tuple[int, int, int, int]) -> Tu
 
 def classify_undertone_and_depth(mean_rgb: Tuple[int, int, int]) -> Tuple[str, str]:
     if cv2 is None:
-        # fallback heuristic
         lum = _rgb_luminance(mean_rgb)
         depth = "Light" if lum > 0.66 else "Medium" if lum > 0.50 else "Deep"
         undertone = "Neutral"
@@ -392,10 +394,12 @@ def offline_complexion_profile(img: Image.Image, category: str, seed: str) -> di
 
     undertone, depth = classify_undertone_and_depth(mean_rgb)
 
-    # simple morning/evening split from outfit palette
     pal = _dominant_palette(img, k=8)
-    # sort by luminance (morning brighter, evening darker)
-    scored = [(_rgb_luminance(tuple(int(p) for p in (int(pal_i["hex"][1:3],16), int(pal_i["hex"][3:5],16), int(pal_i["hex"][5:7],16)))), pal_i) for pal_i in pal]
+    def hex_to_rgb(h):
+        h = h.lstrip("#")
+        return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+
+    scored = [(_rgb_luminance(hex_to_rgb(p["hex"])), p) for p in pal]
     scored.sort(key=lambda t: t[0], reverse=True)
     morning = [p for _, p in scored[:5]]
     evening = [p for _, p in scored[-5:]][::-1]
@@ -421,24 +425,38 @@ def _rotate_key_if_possible():
         CURRENT_KEY = next(KEY_CYCLE)
         genai.configure(api_key=CURRENT_KEY)
 
+def _choose_model(primary: str, fallback: str) -> str:
+    # If primary 404s, we retry with fallback.
+    return primary or fallback
+
 def generate_text_with_retry(prompt: str) -> Optional[str]:
     if not HAS_GEMINI:
         return None
     last_err = None
-    for _ in range(max(2, len(API_KEYS) * 2)):
+
+    for attempt in range(max(2, len(API_KEYS) * 2)):
         try:
             model = genai.GenerativeModel(TEXT_MODEL)
             resp = model.generate_content(prompt)
             return getattr(resp, "text", None) or None
-        except exceptions.ResourceExhausted as e:
-            last_err = e
-            st.session_state["gemini_last_error"] = f"ResourceExhausted: {e}"
-            _rotate_key_if_possible()
-            time.sleep(0.8)
+
         except Exception as e:
             last_err = e
-            st.session_state["gemini_last_error"] = f"{type(e).__name__}: {e}"
-            time.sleep(0.3)
+            msg = f"{type(e).__name__}: {e}"
+            st.session_state["gemini_last_error"] = msg
+
+            # If the model name is invalid (404), swap to fallback model and retry
+            if "NotFound" in msg or "404" in msg or "is not found" in msg:
+                # swap to fallback for subsequent tries
+                global TEXT_MODEL
+                TEXT_MODEL = FALLBACK_TEXT_MODEL
+
+            if isinstance(e, exceptions.ResourceExhausted):
+                _rotate_key_if_possible()
+                time.sleep(0.8)
+            else:
+                time.sleep(0.3)
+
     if last_err:
         st.session_state["gemini_last_error"] = f"Final: {type(last_err).__name__}: {last_err}"
     return None
@@ -448,7 +466,7 @@ def generate_multimodal_with_retry(prompt: str, img: Image.Image) -> Optional[st
         return None
 
     last_err = None
-    for _ in range(max(2, len(API_KEYS) * 2)):
+    for attempt in range(max(2, len(API_KEYS) * 2)):
         try:
             model = genai.GenerativeModel(
                 VISION_MODEL,
@@ -458,15 +476,22 @@ def generate_multimodal_with_retry(prompt: str, img: Image.Image) -> Optional[st
             txt = getattr(resp, "text", None) or None
             st.session_state["gemini_last_raw"] = (txt or "")[:2000]
             return txt
-        except exceptions.ResourceExhausted as e:
-            last_err = e
-            st.session_state["gemini_last_error"] = f"ResourceExhausted: {e}"
-            _rotate_key_if_possible()
-            time.sleep(0.8)
+
         except Exception as e:
             last_err = e
-            st.session_state["gemini_last_error"] = f"{type(e).__name__}: {e}"
-            time.sleep(0.3)
+            msg = f"{type(e).__name__}: {e}"
+            st.session_state["gemini_last_error"] = msg
+
+            # If the model name is invalid (404), swap to fallback model and retry
+            if "NotFound" in msg or "404" in msg or "is not found" in msg:
+                global VISION_MODEL
+                VISION_MODEL = FALLBACK_VISION_MODEL
+
+            if isinstance(e, exceptions.ResourceExhausted):
+                _rotate_key_if_possible()
+                time.sleep(0.8)
+            else:
+                time.sleep(0.3)
 
     if last_err:
         st.session_state["gemini_last_error"] = f"Final: {type(last_err).__name__}: {last_err}"
@@ -478,8 +503,7 @@ def gemini_image_style_insight_cached(img_hash: str, prompt: str, img_bytes: byt
         return None
     img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
     txt = generate_multimodal_with_retry(prompt, img)
-    j = _safe_json_loads(txt or "")
-    return j
+    return _safe_json_loads(txt or "")
 
 def gemini_image_style_insight(img: Image.Image, style: dict, country: str, category: str) -> Optional[dict]:
     if not HAS_GEMINI:
@@ -512,7 +536,7 @@ Analyze the photo and return JSON with keys:
 - color_pairings: array of 3 pairings like "Camel + Cream + Gold"
 - explanation: 2-3 sentences
 
-Context to use:
+Context:
 - undertone={undertone}, depth={depth}, label={label}
 - candidate_best_colors={pal[:10]}
 - candidate_morning_colors={morning[:8]}
@@ -521,8 +545,7 @@ Context to use:
 
     img_hash = st.session_state.get("img_hash", "img")
     img_bytes = st.session_state.get("img_bytes", b"")
-    j = gemini_image_style_insight_cached(img_hash, prompt, img_bytes)
-    return j
+    return gemini_image_style_insight_cached(img_hash, prompt, img_bytes)
 
 
 # -----------------------------
@@ -661,6 +684,9 @@ def render_upload_screen():
         if err:
             st.error(f"Gemini error: {err}")
 
+        st.caption(f"Text model: **{TEXT_MODEL}**")
+        st.caption(f"Vision model: **{VISION_MODEL}**")
+
         if st.button("🧹 Clear cache (Gemini)", use_container_width=True):
             st.cache_data.clear()
             for k in ["gemini_insight", "gemini_last_error", "gemini_last_raw"]:
@@ -671,7 +697,6 @@ def render_upload_screen():
         st.markdown("### ⚙️ Preferences")
         category = st.radio("Collection", ["Women", "Men"], horizontal=True, key="sb_category")
         country = st.selectbox("Region", list(COUNTRIES.keys()), key="sb_country")
-
         st.session_state["category"] = category
         st.session_state["country"] = country
 
@@ -682,7 +707,6 @@ def render_upload_screen():
         render_center_upload_panel()
         return
 
-    # Header selection bar
     st.markdown(
         f"<div class='card' style='display:flex; justify-content:space-between; align-items:center;'>"
         f"<div><b>Selected</b> · {st.session_state.get('category','Women')} · {st.session_state.get('country','United States')}</div>"
@@ -722,7 +746,6 @@ def render_upload_screen():
 
         st.markdown("</div>", unsafe_allow_html=True)
 
-        # show palette always (offline)
         style = st.session_state.get("style")
         if style:
             st.markdown("<div class='card' style='margin-top:12px;'>", unsafe_allow_html=True)
@@ -744,7 +767,6 @@ def render_upload_screen():
             st.markdown("</div>", unsafe_allow_html=True)
 
     with col2:
-        # ✅ Put an Analyze button right where users expect it
         if st.button("✨ Analyze style", type="primary", use_container_width=True, key="analyze_right"):
             seed = st.session_state.get("img_hash", "seed")
             st.session_state["style"] = offline_complexion_profile(img, st.session_state["category"], seed)
@@ -798,7 +820,6 @@ def render_upload_screen():
                     st.write("**Why these colors work**")
                     st.caption(insight.get("explanation"))
 
-                # Optional debug: raw response (helps when parse fails)
                 with st.expander("Debug: Gemini raw (first 2k chars)", expanded=False):
                     st.code(st.session_state.get("gemini_last_raw", ""), language="json")
 
@@ -810,7 +831,6 @@ def render_upload_screen():
 
         st.markdown("</div>", unsafe_allow_html=True)
 
-        # Lookbook button
         style = st.session_state.get("style")
         if style:
             st.markdown("<div class='card' style='margin-top:12px;'>", unsafe_allow_html=True)

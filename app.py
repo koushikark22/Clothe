@@ -1,5 +1,5 @@
 # app.py
-# LOOKBOOK AI — Streamlit + Gemini 3 (model-fallback + JSON-safe + Cloud-safe)
+# LOOKBOOK AI — Streamlit + Gemini 3 (clean UI: only shows Gemini model used)
 
 import os
 import re
@@ -44,7 +44,6 @@ st.set_page_config(
 load_dotenv()  # local only (.env)
 
 def _get_secret(name: str) -> str:
-    # Works locally (os.getenv) + Streamlit Cloud (st.secrets)
     return os.getenv(name) or st.secrets.get(name, "")
 
 API_KEY = _get_secret("GEMINI_API_KEY") or _get_secret("GOOGLE_API_KEY")
@@ -64,21 +63,18 @@ if HAS_GEMINI and CURRENT_KEY:
     genai.configure(api_key=CURRENT_KEY)
 
 # -----------------------------
-# ✅ GEMINI 3 MODELS (Developer API)
-# - Gemini 3 models are preview; model IDs commonly used:
-#   gemini-3-flash-preview, gemini-3-pro-preview
-# We also try gemini-3-flash (if enabled for your key), then fall back.
+# ✅ GEMINI 3 MODELS
+# IMPORTANT: remove "gemini-3-flash" (it 404s for many keys/endpoints)
+# Use preview models first to satisfy "Gemini 3" hackathon requirement.
 # -----------------------------
 TEXT_MODEL_CANDIDATES = [
     os.getenv("GEMINI_TEXT_MODEL", "").strip(),
-    "gemini-3-flash",          # if available for your key
-    "gemini-3-flash-preview",  # most common for Gemini 3 hackathon
+    "gemini-3-flash-preview",
     "gemini-3-pro-preview",
-    "gemini-2.5-flash",        # safety fallback if 3-series not enabled
+    "gemini-2.5-flash",  # fallback if 3-series not enabled
 ]
 VISION_MODEL_CANDIDATES = [
     os.getenv("GEMINI_VISION_MODEL", "").strip(),
-    "gemini-3-flash",          # if available
     "gemini-3-flash-preview",
     "gemini-3-pro-preview",
     "gemini-2.5-flash",
@@ -393,6 +389,7 @@ def offline_complexion_profile(img: Image.Image, category: str, seed: str) -> di
     undertone, depth = classify_undertone_and_depth(mean_rgb)
 
     pal = _dominant_palette(img, k=8)
+
     def hex_to_rgb(h):
         h = h.lstrip("#")
         return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
@@ -415,7 +412,7 @@ def offline_complexion_profile(img: Image.Image, category: str, seed: str) -> di
 
 
 # -----------------------------
-# GEMINI 3 (robust + no-global-bugs + debug)
+# GEMINI 3 (robust, quiet)
 # -----------------------------
 def _rotate_key_if_possible():
     global CURRENT_KEY
@@ -432,7 +429,6 @@ def generate_text_with_retry(prompt: str) -> Optional[str]:
         return None
 
     last_err: Optional[Exception] = None
-    # Try each model, then rotate keys if needed
     for model_name in TEXT_MODEL_CANDIDATES:
         for _ in range(max(2, len(API_KEYS))):
             try:
@@ -442,19 +438,14 @@ def generate_text_with_retry(prompt: str) -> Optional[str]:
                 return getattr(resp, "text", None) or None
             except exceptions.ResourceExhausted as e:
                 last_err = e
-                st.session_state["gemini_last_error"] = f"ResourceExhausted: {e}"
                 _rotate_key_if_possible()
                 time.sleep(0.8)
             except Exception as e:
                 last_err = e
-                st.session_state["gemini_last_error"] = f"{type(e).__name__}: {e}"
-                # If model not found, break to try next model candidate
                 if _is_not_found(e):
                     break
                 time.sleep(0.3)
-
-    if last_err:
-        st.session_state["gemini_last_error"] = f"Final: {type(last_err).__name__}: {last_err}"
+    st.session_state["gemini_last_error"] = f"{type(last_err).__name__}: {last_err}" if last_err else "Unknown error"
     return None
 
 def generate_multimodal_with_retry(prompt: str, img: Image.Image) -> Optional[str]:
@@ -471,23 +462,18 @@ def generate_multimodal_with_retry(prompt: str, img: Image.Image) -> Optional[st
                 )
                 resp = model.generate_content([prompt, img.convert("RGB")])
                 txt = getattr(resp, "text", None) or None
-                st.session_state["gemini_last_raw"] = (txt or "")[:2000]
                 st.session_state["gemini_vision_model_used"] = model_name
                 return txt
             except exceptions.ResourceExhausted as e:
                 last_err = e
-                st.session_state["gemini_last_error"] = f"ResourceExhausted: {e}"
                 _rotate_key_if_possible()
                 time.sleep(0.8)
             except Exception as e:
                 last_err = e
-                st.session_state["gemini_last_error"] = f"{type(e).__name__}: {e}"
                 if _is_not_found(e):
                     break
                 time.sleep(0.3)
-
-    if last_err:
-        st.session_state["gemini_last_error"] = f"Final: {type(last_err).__name__}: {last_err}"
+    st.session_state["gemini_last_error"] = f"{type(last_err).__name__}: {last_err}" if last_err else "Unknown error"
     return None
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -514,7 +500,6 @@ def gemini_image_style_insight(img: Image.Image, style: dict, country: str, cate
     prompt = f"""
 Return STRICT JSON only (no markdown, no commentary).
 
-You are a fashion stylist assistant.
 Analyze the photo and return JSON with keys:
 - outfit_summary: string (1-2 sentences)
 - formality: one of ["casual","smart casual","work","evening","formal"]
@@ -579,15 +564,6 @@ def get_country_context(country: str, gender: str):
     return headlines, celebs
 
 def gemini_lookbook_text(country: str, category: str, style: dict, headlines: List[str], celebs: List[str]) -> dict:
-    if not HAS_GEMINI:
-        return {
-            "trend_summary": f"Across {country}, trends include: {', '.join(headlines[:3])}.",
-            "style_translation": ["Anchor looks in your palette.", "Prioritize clean structure.", "Let texture do the work."],
-            "outfit_idea": "Crisp top + tailored bottom + sleek layer.",
-            "shop_keywords": ["tailored blazer", "straight trousers", "minimal sneakers"],
-            "celeb_styling": [{"name": c, "wearing": "Use your palette + clean tailoring."} for c in celebs[:5]],
-        }
-
     prompt = f"""
 Return ONLY valid JSON (no markdown).
 
@@ -643,14 +619,14 @@ def render_center_upload_panel():
 
     if clear:
         for k in ["img_bytes", "img_name", "img_hash", "style", "lookbook",
-                  "gemini_insight", "gemini_last_error", "gemini_last_raw",
+                  "gemini_insight", "gemini_last_error",
                   "gemini_text_model_used", "gemini_vision_model_used"]:
             st.session_state.pop(k, None)
         st.rerun()
 
     if use and uploaded is not None:
         save_uploaded_file_to_state(uploaded)
-        for k in ["style", "lookbook", "gemini_insight", "gemini_last_error", "gemini_last_raw",
+        for k in ["style", "lookbook", "gemini_insight", "gemini_last_error",
                   "gemini_text_model_used", "gemini_vision_model_used"]:
             st.session_state.pop(k, None)
         st.rerun()
@@ -670,43 +646,29 @@ def render_upload_screen():
     has_img = img is not None
 
     with st.sidebar:
-        st.markdown("### 🔍 Gemini Debug")
-        st.write("HAS_GEMINI =", HAS_GEMINI)
-        st.write("API_KEYS =", len(API_KEYS))
-        st.write("CURRENT_KEY exists =", bool(CURRENT_KEY))
-
-        st.caption("Text candidates:")
-        st.code("\n".join(TEXT_MODEL_CANDIDATES), language="text")
-        st.caption("Vision candidates:")
-        st.code("\n".join(VISION_MODEL_CANDIDATES), language="text")
-
-        if cv2 is None:
-            st.warning("OpenCV not available (cv2). Face detection will fallback to outfit colors.")
-
-        used_t = st.session_state.get("gemini_text_model_used")
-        used_v = st.session_state.get("gemini_vision_model_used")
-        if used_t:
-            st.success(f"Text model used: {used_t}")
-        if used_v:
-            st.success(f"Vision model used: {used_v}")
-
-        err = st.session_state.get("gemini_last_error")
-        if err:
-            st.error(f"Gemini error: {err}")
-
-        if st.button("🧹 Clear cache (Gemini)", use_container_width=True):
-            st.cache_data.clear()
-            for k in ["gemini_insight", "gemini_last_error", "gemini_last_raw",
-                      "gemini_text_model_used", "gemini_vision_model_used"]:
-                st.session_state.pop(k, None)
-            st.rerun()
-
-        st.markdown("---")
-        st.markdown("### ⚙️ Preferences")
+        st.markdown("### Preferences")
         category = st.radio("Collection", ["Women", "Men"], horizontal=True, key="sb_category")
         country = st.selectbox("Region", list(COUNTRIES.keys()), key="sb_country")
         st.session_state["category"] = category
         st.session_state["country"] = country
+
+        st.markdown("---")
+        # ✅ ONLY show the model used (clean)
+        used_v = st.session_state.get("gemini_vision_model_used")
+        used_t = st.session_state.get("gemini_text_model_used")
+        if HAS_GEMINI and (used_v or used_t):
+            st.success(f"Gemini model used: {used_v or used_t}")
+        elif HAS_GEMINI:
+            st.info("Gemini: connected")
+        else:
+            st.warning("Gemini: not connected (missing API key)")
+
+        if st.button("🧹 Clear cache", use_container_width=True):
+            st.cache_data.clear()
+            for k in ["gemini_insight", "gemini_last_error",
+                      "gemini_text_model_used", "gemini_vision_model_used"]:
+                st.session_state.pop(k, None)
+            st.rerun()
 
     if not has_img:
         render_center_upload_panel()
@@ -727,12 +689,12 @@ def render_upload_screen():
         seed = st.session_state.get("img_hash", "seed")
         st.session_state["style"] = offline_complexion_profile(img, st.session_state["category"], seed)
 
-        for k in ["gemini_insight", "gemini_last_error", "gemini_last_raw",
-                  "gemini_text_model_used",'streamlit_version', "gemini_vision_model_used"]:
+        for k in ["gemini_insight", "gemini_last_error",
+                  "gemini_text_model_used", "gemini_vision_model_used"]:
             st.session_state.pop(k, None)
 
         if HAS_GEMINI:
-            with st.spinner("Gemini 3 is analyzing your photo…"):
+            with st.spinner("Gemini is analyzing your photo…"):
                 insight = gemini_image_style_insight(
                     img,
                     st.session_state["style"],
@@ -742,10 +704,10 @@ def render_upload_screen():
             if insight:
                 st.session_state["gemini_insight"] = insight
             else:
-                st.session_state["gemini_last_error"] = st.session_state.get("gemini_last_error") or \
-                    "Gemini returned no JSON (parse failed). Expand debug raw/error."
+                # keep it clean: no big debug UI
+                st.session_state["gemini_last_error"] = st.session_state.get("gemini_last_error") or "Gemini failed."
         else:
-            st.session_state["gemini_last_error"] = "HAS_GEMINI=False (no API key found)."
+            st.session_state["gemini_last_error"] = "No Gemini key."
 
         st.rerun()
 
@@ -785,7 +747,7 @@ def render_upload_screen():
         insight = st.session_state.get("gemini_insight")
 
         st.markdown("<div class='card' style='margin-top:12px;'>", unsafe_allow_html=True)
-        with st.expander("✨ Gemini 3 Insight (style + color reasoning)", expanded=True):
+        with st.expander("✨ Gemini Insight (style + color reasoning)", expanded=True):
             if insight:
                 st.write("**Outfit summary**")
                 st.caption(insight.get("outfit_summary", ""))
@@ -814,23 +776,15 @@ def render_upload_screen():
                 if insight.get("explanation"):
                     st.write("**Why these colors work**")
                     st.caption(insight.get("explanation"))
-
             else:
                 st.caption("Click **Analyze style** to generate Gemini insights.")
-
-            with st.expander("Debug: Gemini raw/error", expanded=False):
-                st.write("Error:", st.session_state.get("gemini_last_error", ""))
-                st.code(st.session_state.get("gemini_last_raw", ""), language="text")
-                st.write("Text model used:", st.session_state.get("gemini_text_model_used", ""))
-                st.write("Vision model used:", st.session_state.get("gemini_vision_model_used", ""))
-
         st.markdown("</div>", unsafe_allow_html=True)
 
         style = st.session_state.get("style")
         if style:
             st.markdown("<div class='card' style='margin-top:12px;'>", unsafe_allow_html=True)
             st.subheader("🚀 Next step")
-            st.caption("Generate a regional lookbook (Gemini 3 text).")
+            st.caption("Generate a regional lookbook (Gemini text).")
             if st.button("Open Lookbook", use_container_width=True):
                 headlines, celebs = get_country_context(st.session_state["country"], st.session_state["category"])
                 st.session_state["lookbook"] = gemini_lookbook_text(
@@ -838,7 +792,6 @@ def render_upload_screen():
                 )
                 navigate_to("lookbook")
             st.markdown("</div>", unsafe_allow_html=True)
-
 
 def render_lookbook_screen():
     country = st.session_state.get("country", "United States")

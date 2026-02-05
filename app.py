@@ -1,7 +1,6 @@
 # app.py
-# LOOKBOOK AI — Streamlit + Gemini (Cloud-safe, JSON-safe, debuggable)
-global TEXT_MODEL
-#global VISION_MODEL
+# LOOKBOOK AI — Streamlit + Gemini 3 (model-fallback + JSON-safe + Cloud-safe)
+
 import os
 import re
 import io
@@ -13,7 +12,6 @@ import itertools
 from typing import Optional, List, Dict, Tuple
 
 import streamlit as st
-import requests
 import feedparser
 import numpy as np
 from PIL import Image
@@ -25,7 +23,7 @@ try:
 except Exception:
     cv2 = None
 
-# Gemini
+# Gemini (Gemini Developer API)
 import google.generativeai as genai
 from google.api_core import exceptions
 
@@ -39,7 +37,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
-
 
 # -----------------------------
 # SECRETS / ENV (Cloud + Local)
@@ -66,14 +63,28 @@ CURRENT_KEY = next(KEY_CYCLE) if API_KEYS else None
 if HAS_GEMINI and CURRENT_KEY:
     genai.configure(api_key=CURRENT_KEY)
 
-# ✅ FIX: use currently supported Gemini API model IDs
-# According to Google AI for Developers docs, stable flash model code is gemini-2.5-flash. :contentReference[oaicite:1]{index=1}
-TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL") or "gemini-2.5-flash"
-VISION_MODEL = os.getenv("GEMINI_VISION_MODEL") or "gemini-2.5-flash"
-
-# Optional fallback if a model is unavailable in your region/key
-FALLBACK_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL_FALLBACK") or "gemini-2.5-flash-lite"
-FALLBACK_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL_FALLBACK") or "gemini-2.5-flash-lite"
+# -----------------------------
+# ✅ GEMINI 3 MODELS (Developer API)
+# - Gemini 3 models are preview; model IDs commonly used:
+#   gemini-3-flash-preview, gemini-3-pro-preview
+# We also try gemini-3-flash (if enabled for your key), then fall back.
+# -----------------------------
+TEXT_MODEL_CANDIDATES = [
+    os.getenv("GEMINI_TEXT_MODEL", "").strip(),
+    "gemini-3-flash",          # if available for your key
+    "gemini-3-flash-preview",  # most common for Gemini 3 hackathon
+    "gemini-3-pro-preview",
+    "gemini-2.5-flash",        # safety fallback if 3-series not enabled
+]
+VISION_MODEL_CANDIDATES = [
+    os.getenv("GEMINI_VISION_MODEL", "").strip(),
+    "gemini-3-flash",          # if available
+    "gemini-3-flash-preview",
+    "gemini-3-pro-preview",
+    "gemini-2.5-flash",
+]
+TEXT_MODEL_CANDIDATES = [m for m in TEXT_MODEL_CANDIDATES if m]
+VISION_MODEL_CANDIDATES = [m for m in VISION_MODEL_CANDIDATES if m]
 
 
 # -----------------------------
@@ -122,20 +133,6 @@ def navigate_to(view_name: str):
 # -----------------------------
 def _enc(s: str) -> str:
     return urllib.parse.quote_plus(str(s).strip())
-
-def unique_keep_order(items: List[str]) -> List[str]:
-    seen = set()
-    out = []
-    for x in items or []:
-        x = str(x).strip()
-        if not x:
-            continue
-        k = x.lower()
-        if k in seen:
-            continue
-        seen.add(k)
-        out.append(x)
-    return out
 
 def save_uploaded_file_to_state(uploaded_file):
     if uploaded_file is None:
@@ -418,7 +415,7 @@ def offline_complexion_profile(img: Image.Image, category: str, seed: str) -> di
 
 
 # -----------------------------
-# GEMINI (robust + debuggable)
+# GEMINI 3 (robust + no-global-bugs + debug)
 # -----------------------------
 def _rotate_key_if_possible():
     global CURRENT_KEY
@@ -426,36 +423,34 @@ def _rotate_key_if_possible():
         CURRENT_KEY = next(KEY_CYCLE)
         genai.configure(api_key=CURRENT_KEY)
 
-def _choose_model(primary: str, fallback: str) -> str:
-    # If primary 404s, we retry with fallback.
-    return primary or fallback
+def _is_not_found(err: Exception) -> bool:
+    s = f"{type(err).__name__}: {err}"
+    return ("NotFound" in s) or ("404" in s) or ("is not found" in s) or ("not supported" in s)
 
 def generate_text_with_retry(prompt: str) -> Optional[str]:
     if not HAS_GEMINI:
         return None
-    last_err = None
 
-    for attempt in range(max(2, len(API_KEYS) * 2)):
-        try:
-            model = genai.GenerativeModel(TEXT_MODEL)
-            resp = model.generate_content(prompt)
-            return getattr(resp, "text", None) or None
-
-        except Exception as e:
-            last_err = e
-            msg = f"{type(e).__name__}: {e}"
-            st.session_state["gemini_last_error"] = msg
-
-            # If the model name is invalid (404), swap to fallback model and retry
-            if "NotFound" in msg or "404" in msg or "is not found" in msg:
-                # swap to fallback for subsequent tries
-                #global TEXT_MODEL
-                TEXT_MODEL = FALLBACK_TEXT_MODEL
-
-            if isinstance(e, exceptions.ResourceExhausted):
+    last_err: Optional[Exception] = None
+    # Try each model, then rotate keys if needed
+    for model_name in TEXT_MODEL_CANDIDATES:
+        for _ in range(max(2, len(API_KEYS))):
+            try:
+                model = genai.GenerativeModel(model_name)
+                resp = model.generate_content(prompt)
+                st.session_state["gemini_text_model_used"] = model_name
+                return getattr(resp, "text", None) or None
+            except exceptions.ResourceExhausted as e:
+                last_err = e
+                st.session_state["gemini_last_error"] = f"ResourceExhausted: {e}"
                 _rotate_key_if_possible()
                 time.sleep(0.8)
-            else:
+            except Exception as e:
+                last_err = e
+                st.session_state["gemini_last_error"] = f"{type(e).__name__}: {e}"
+                # If model not found, break to try next model candidate
+                if _is_not_found(e):
+                    break
                 time.sleep(0.3)
 
     if last_err:
@@ -466,32 +461,29 @@ def generate_multimodal_with_retry(prompt: str, img: Image.Image) -> Optional[st
     if not HAS_GEMINI:
         return None
 
-    last_err = None
-    for attempt in range(max(2, len(API_KEYS) * 2)):
-        try:
-            model = genai.GenerativeModel(
-                VISION_MODEL,
-                generation_config={"response_mime_type": "application/json"},
-            )
-            resp = model.generate_content([prompt, img.convert("RGB")])
-            txt = getattr(resp, "text", None) or None
-            st.session_state["gemini_last_raw"] = (txt or "")[:2000]
-            return txt
-
-        except Exception as e:
-            last_err = e
-            msg = f"{type(e).__name__}: {e}"
-            st.session_state["gemini_last_error"] = msg
-
-            # If the model name is invalid (404), swap to fallback model and retry
-            if "NotFound" in msg or "404" in msg or "is not found" in msg:
-                global VISION_MODEL
-                VISION_MODEL = FALLBACK_VISION_MODEL
-
-            if isinstance(e, exceptions.ResourceExhausted):
+    last_err: Optional[Exception] = None
+    for model_name in VISION_MODEL_CANDIDATES:
+        for _ in range(max(2, len(API_KEYS))):
+            try:
+                model = genai.GenerativeModel(
+                    model_name,
+                    generation_config={"response_mime_type": "application/json"},
+                )
+                resp = model.generate_content([prompt, img.convert("RGB")])
+                txt = getattr(resp, "text", None) or None
+                st.session_state["gemini_last_raw"] = (txt or "")[:2000]
+                st.session_state["gemini_vision_model_used"] = model_name
+                return txt
+            except exceptions.ResourceExhausted as e:
+                last_err = e
+                st.session_state["gemini_last_error"] = f"ResourceExhausted: {e}"
                 _rotate_key_if_possible()
                 time.sleep(0.8)
-            else:
+            except Exception as e:
+                last_err = e
+                st.session_state["gemini_last_error"] = f"{type(e).__name__}: {e}"
+                if _is_not_found(e):
+                    break
                 time.sleep(0.3)
 
     if last_err:
@@ -550,7 +542,7 @@ Context:
 
 
 # -----------------------------
-# LOOKBOOK (text-only, basic)
+# LOOKBOOK (text-only)
 # -----------------------------
 COUNTRIES = {
     "United States": {"hl": "en-US", "gl": "US"},
@@ -650,13 +642,16 @@ def render_center_upload_panel():
         clear = st.button("🗑️ Clear", use_container_width=True)
 
     if clear:
-        for k in ["img_bytes", "img_name", "img_hash", "style", "lookbook", "gemini_insight", "gemini_last_error", "gemini_last_raw"]:
+        for k in ["img_bytes", "img_name", "img_hash", "style", "lookbook",
+                  "gemini_insight", "gemini_last_error", "gemini_last_raw",
+                  "gemini_text_model_used", "gemini_vision_model_used"]:
             st.session_state.pop(k, None)
         st.rerun()
 
     if use and uploaded is not None:
         save_uploaded_file_to_state(uploaded)
-        for k in ["style", "lookbook", "gemini_insight", "gemini_last_error", "gemini_last_raw"]:
+        for k in ["style", "lookbook", "gemini_insight", "gemini_last_error", "gemini_last_raw",
+                  "gemini_text_model_used", "gemini_vision_model_used"]:
             st.session_state.pop(k, None)
         st.rerun()
 
@@ -679,18 +674,30 @@ def render_upload_screen():
         st.write("HAS_GEMINI =", HAS_GEMINI)
         st.write("API_KEYS =", len(API_KEYS))
         st.write("CURRENT_KEY exists =", bool(CURRENT_KEY))
+
+        st.caption("Text candidates:")
+        st.code("\n".join(TEXT_MODEL_CANDIDATES), language="text")
+        st.caption("Vision candidates:")
+        st.code("\n".join(VISION_MODEL_CANDIDATES), language="text")
+
         if cv2 is None:
             st.warning("OpenCV not available (cv2). Face detection will fallback to outfit colors.")
+
+        used_t = st.session_state.get("gemini_text_model_used")
+        used_v = st.session_state.get("gemini_vision_model_used")
+        if used_t:
+            st.success(f"Text model used: {used_t}")
+        if used_v:
+            st.success(f"Vision model used: {used_v}")
+
         err = st.session_state.get("gemini_last_error")
         if err:
             st.error(f"Gemini error: {err}")
 
-        st.caption(f"Text model: **{TEXT_MODEL}**")
-        st.caption(f"Vision model: **{VISION_MODEL}**")
-
         if st.button("🧹 Clear cache (Gemini)", use_container_width=True):
             st.cache_data.clear()
-            for k in ["gemini_insight", "gemini_last_error", "gemini_last_raw"]:
+            for k in ["gemini_insight", "gemini_last_error", "gemini_last_raw",
+                      "gemini_text_model_used", "gemini_vision_model_used"]:
                 st.session_state.pop(k, None)
             st.rerun()
 
@@ -700,9 +707,6 @@ def render_upload_screen():
         country = st.selectbox("Region", list(COUNTRIES.keys()), key="sb_country")
         st.session_state["category"] = category
         st.session_state["country"] = country
-
-        st.markdown("---")
-        st.caption("Tip: upload → click Analyze → Gemini Insight appears on the right panel.")
 
     if not has_img:
         render_center_upload_panel()
@@ -719,32 +723,39 @@ def render_upload_screen():
 
     col1, col2 = st.columns([1.1, 0.9], gap="large")
 
+    def _run_analysis():
+        seed = st.session_state.get("img_hash", "seed")
+        st.session_state["style"] = offline_complexion_profile(img, st.session_state["category"], seed)
+
+        for k in ["gemini_insight", "gemini_last_error", "gemini_last_raw",
+                  "gemini_text_model_used",'streamlit_version', "gemini_vision_model_used"]:
+            st.session_state.pop(k, None)
+
+        if HAS_GEMINI:
+            with st.spinner("Gemini 3 is analyzing your photo…"):
+                insight = gemini_image_style_insight(
+                    img,
+                    st.session_state["style"],
+                    st.session_state["country"],
+                    st.session_state["category"]
+                )
+            if insight:
+                st.session_state["gemini_insight"] = insight
+            else:
+                st.session_state["gemini_last_error"] = st.session_state.get("gemini_last_error") or \
+                    "Gemini returned no JSON (parse failed). Expand debug raw/error."
+        else:
+            st.session_state["gemini_last_error"] = "HAS_GEMINI=False (no API key found)."
+
+        st.rerun()
+
     with col1:
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         st.subheader("Your Upload")
         st.caption(st.session_state.get("img_name", "uploaded image"))
         st.image(img, use_container_width=True)
-
         if st.button("✨ Analyze style", type="primary", use_container_width=True, key="analyze_left"):
-            seed = st.session_state.get("img_hash", "seed")
-            st.session_state["style"] = offline_complexion_profile(img, st.session_state["category"], seed)
-
-            st.session_state.pop("gemini_insight", None)
-            st.session_state.pop("gemini_last_error", None)
-            st.session_state.pop("gemini_last_raw", None)
-
-            if HAS_GEMINI:
-                with st.spinner("Gemini is analyzing your photo…"):
-                    insight = gemini_image_style_insight(img, st.session_state["style"], st.session_state["country"], st.session_state["category"])
-                if insight:
-                    st.session_state["gemini_insight"] = insight
-                else:
-                    st.session_state["gemini_last_error"] = st.session_state.get("gemini_last_error") or "Gemini returned no JSON (parse failed). See raw in debug."
-            else:
-                st.session_state["gemini_last_error"] = "HAS_GEMINI=False (no API key found)."
-
-            st.rerun()
-
+            _run_analysis()
         st.markdown("</div>", unsafe_allow_html=True)
 
         style = st.session_state.get("style")
@@ -769,29 +780,12 @@ def render_upload_screen():
 
     with col2:
         if st.button("✨ Analyze style", type="primary", use_container_width=True, key="analyze_right"):
-            seed = st.session_state.get("img_hash", "seed")
-            st.session_state["style"] = offline_complexion_profile(img, st.session_state["category"], seed)
-
-            st.session_state.pop("gemini_insight", None)
-            st.session_state.pop("gemini_last_error", None)
-            st.session_state.pop("gemini_last_raw", None)
-
-            if HAS_GEMINI:
-                with st.spinner("Gemini is analyzing your photo…"):
-                    insight = gemini_image_style_insight(img, st.session_state["style"], st.session_state["country"], st.session_state["category"])
-                if insight:
-                    st.session_state["gemini_insight"] = insight
-                else:
-                    st.session_state["gemini_last_error"] = st.session_state.get("gemini_last_error") or "Gemini returned no JSON (parse failed). See raw in debug."
-            else:
-                st.session_state["gemini_last_error"] = "HAS_GEMINI=False (no API key found)."
-
-            st.rerun()
+            _run_analysis()
 
         insight = st.session_state.get("gemini_insight")
 
         st.markdown("<div class='card' style='margin-top:12px;'>", unsafe_allow_html=True)
-        with st.expander("✨ Gemini Insight (style + color reasoning)", expanded=True):
+        with st.expander("✨ Gemini 3 Insight (style + color reasoning)", expanded=True):
             if insight:
                 st.write("**Outfit summary**")
                 st.caption(insight.get("outfit_summary", ""))
@@ -821,14 +815,14 @@ def render_upload_screen():
                     st.write("**Why these colors work**")
                     st.caption(insight.get("explanation"))
 
-                with st.expander("Debug: Gemini raw (first 2k chars)", expanded=False):
-                    st.code(st.session_state.get("gemini_last_raw", ""), language="json")
-
             else:
                 st.caption("Click **Analyze style** to generate Gemini insights.")
-                with st.expander("Debug: Gemini raw/error", expanded=False):
-                    st.write("Error:", st.session_state.get("gemini_last_error", ""))
-                    st.code(st.session_state.get("gemini_last_raw", ""), language="text")
+
+            with st.expander("Debug: Gemini raw/error", expanded=False):
+                st.write("Error:", st.session_state.get("gemini_last_error", ""))
+                st.code(st.session_state.get("gemini_last_raw", ""), language="text")
+                st.write("Text model used:", st.session_state.get("gemini_text_model_used", ""))
+                st.write("Vision model used:", st.session_state.get("gemini_vision_model_used", ""))
 
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -836,10 +830,12 @@ def render_upload_screen():
         if style:
             st.markdown("<div class='card' style='margin-top:12px;'>", unsafe_allow_html=True)
             st.subheader("🚀 Next step")
-            st.caption("Generate a regional lookbook (Gemini text).")
+            st.caption("Generate a regional lookbook (Gemini 3 text).")
             if st.button("Open Lookbook", use_container_width=True):
                 headlines, celebs = get_country_context(st.session_state["country"], st.session_state["category"])
-                st.session_state["lookbook"] = gemini_lookbook_text(st.session_state["country"], st.session_state["category"], style, headlines, celebs)
+                st.session_state["lookbook"] = gemini_lookbook_text(
+                    st.session_state["country"], st.session_state["category"], style, headlines, celebs
+                )
                 navigate_to("lookbook")
             st.markdown("</div>", unsafe_allow_html=True)
 

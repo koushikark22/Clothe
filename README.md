@@ -1,18 +1,40 @@
-# LOOKBOOK AI — Global Style Intelligence (Streamlit + Gemini)
+# LOOKBOOK AI  
+### Global Style Intelligence Â· Personalized Fashion Curation
 
-LOOKBOOK AI is a Streamlit web app that turns an uploaded outfit photo into a **Style DNA** profile (vibe label, ideal fit/cut, color palette, key items), then translates that style to a selected country using live fashion trends, celebrity inspiration, and curated shopping links.
+LOOKBOOK AI is a Streamlit-based fashion intelligence application that analyzes an uploaded outfit photo to generate a **personalized color palette, style insight, and region-specific lookbook**.
+
+The system follows an **offline-first architecture**, using local computer vision and color analysis for core functionality, and optionally enhancing results with **Google Gemini** for higher-level style reasoning and curated recommendations.
 
 ---
 
-## Features
+## Key Features
 
-- Outfit image analysis using **Google Gemini**
-- Style DNA extraction as structured JSON
-- Country-specific fashion trends (Google News RSS)
-- Celebrity inspiration by country & gender
-- Retailer shopping links per region
-- Gemini API key rotation to avoid rate limits
-- Streamlit caching for performance
+### ðŸ§  Style & Color Analysis (Offline-First)
+- Dominant color palette extraction from the outfit
+- Optional face detection for complexion-aware analysis
+- Undertone (warm / cool / neutral) and depth estimation
+- Morning vs Evening palette recommendations
+- Graceful fallback to outfit-only analysis if no face is detected
+
+### âœ¨ Gemini-Powered Enhancements (Optional)
+- Structured style insights from the uploaded photo
+- Outfit summary, style tags, and color pairing advice
+- Regional lookbook generation using fashion trends
+- Curated shopping keywords aligned with palette & context
+- Automatic Gemini model resolution (avoids unsupported models)
+- API key rotation to handle quota and rate limits
+
+### ðŸŒ Regional Fashion Intelligence
+- Country-specific fashion trends via Google News RSS
+- Cultural style grounding using representative fashion icons
+- Region-aware retailer links (US, India, UK, Japan)
+- No celebrity images stored or displayed (links only)
+
+### ðŸ›ï¸ Curated Shopping Experience
+- Morning / Evening shopping modes
+- Palette-driven item search
+- Google Shopping & Pinterest discovery links
+- Retailer-specific site search (e.g. Zara, Myntra, ASOS)
 
 ---
 
@@ -20,10 +42,11 @@ LOOKBOOK AI is a Streamlit web app that turns an uploaded outfit photo into a **
 
 - Python 3.9+
 - Streamlit
-- google-generativeai (Gemini)
+- Google Gemini (google-generativeai)
 - Pillow
+- NumPy
+- OpenCV (optional)
 - feedparser
-- requests
 - python-dotenv
 
 ---
@@ -32,25 +55,26 @@ LOOKBOOK AI is a Streamlit web app that turns an uploaded outfit photo into a **
 
 ```
 .
-├── app_full_v4.py
-├── .env
-└── requirements.txt
+â”œâ”€â”€ app.py                # Main Streamlit application
+â”œâ”€â”€ .env                  # Environment variables (not committed)
+â”œâ”€â”€ requirements.txt      # Dependencies
+â””â”€â”€ README.md
 ```
 
 ---
 
 ## Setup Instructions
 
-### 1. Create Virtual Environment (Recommended)
+### 1. Create a Virtual Environment (Recommended)
 
-Windows:
-```
+**Windows**
+```bash
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 ```
 
-macOS / Linux:
-```
+**macOS / Linux**
+```bash
 python3 -m venv .venv
 source .venv/bin/activate
 ```
@@ -59,9 +83,16 @@ source .venv/bin/activate
 
 ### 2. Install Dependencies
 
+```bash
+pip install -r requirements.txt
 ```
-pip install streamlit google-generativeai pillow feedparser requests python-dotenv
+
+Or manually:
+```bash
+pip install streamlit google-generativeai pillow feedparser requests python-dotenv numpy opencv-python
 ```
+
+> OpenCV is optional. If unavailable, the app automatically falls back to outfit-only analysis.
 
 ---
 
@@ -69,61 +100,60 @@ pip install streamlit google-generativeai pillow feedparser requests python-dote
 
 Create a `.env` file in the project root.
 
-Single key:
-```
+**Single API key**
+```env
 GEMINI_API_KEY=your_api_key_here
 ```
 
-Multiple keys (recommended):
-```
+**Multiple API keys (recommended)**
+```env
 GEMINI_API_KEYS=key1,key2,key3
 ```
 
 ---
 
-## Running the App
+## Running the Application
 
-```
-streamlit run app_full_v4.py
+```bash
+streamlit run app.py
 ```
 
-Open browser at:
+Open in browser:
 ```
 http://localhost:8501
 ```
 
 ---
 
-## How It Works (Technical)
+## How It Works (Technical Overview)
 
 1. User uploads an outfit image
-2. Image is analyzed by Gemini to extract Style DNA (JSON)
-3. Google News RSS fetches fashion trends by country
-4. Gemini generates a localized lookbook:
-   - Trend summary
-   - Outfit recommendations
-   - Celebrity inspiration
-   - Shopping keywords
-5. Retailer links are generated dynamically per country
+2. Local pipeline extracts palette and complexion signals
+3. Gemini (if enabled) generates structured style insights
+4. Regional lookbook is created using trends and context
+5. Palette-aware shopping links are generated dynamically
 
 ---
 
-## Caching
+## Design Principles
 
-- Celebrity images cached for 24 hours
-- Trend context cached for 1 hour
-- Reduces API calls and improves performance
+- Offline-first and resilient to API failures
+- Graceful degradation when Gemini or OpenCV is unavailable
+- Copyright-safe (no celebrity images stored)
+- Transparent AI usage (model shown in UI)
+- Performance-aware caching
 
 ---
 
 ## Security Notes
 
-- API keys are loaded via `.env`
-- Do **NOT** commit `.env` to GitHub
-- Add `.env` to `.gitignore`
+- API keys loaded via environment variables or Streamlit secrets
+- `.env` must never be committed to version control
+- No user images are stored on disk
 
 ---
 
 ## License
 
-Add a LICENSE file (MIT / Apache-2.0 recommended)
+Add a license before public release  
+(MIT or Apache-2.0 recommended)

@@ -38,7 +38,7 @@ from google.api_core import exceptions
 # -----------------------------
 st.set_page_config(
     page_title="LOOKBOOK AI | Global Style Intelligence",
-    page_icon="✨",
+    page_icon="",
     layout="wide",
     initial_sidebar_state="expanded",
 )
